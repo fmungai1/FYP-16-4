@@ -4,7 +4,7 @@
  *  Authors:  Fredrick Mungai   EN292-0679/2015
  *            Agnes Maina       EN292-4109/2015
  *  Board:    Arduino Mega 2560          
- *  Date:     22/11/2020
+ *  Date:     08/01/2021
  *  ********************************************************************************************
  */
 
@@ -80,7 +80,7 @@ byte rowPins[rows] = {keypadRow1, keypadRow2, keypadRow3, keypadRow4};
 byte colPins[cols] = {keypadCol1, keypadCol2, keypadCol3, keypadCol4};
 
 // Keypad object
-Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, rows, cols);
+Keypad myKeypad = Keypad(makeKeymap(keys), rowPins, colPins, rows, cols);
 
 // Wiring: SDA pin is connected to pin 20, SCL pin is connected to pin 21 of Arduino Mega
 // Connect LCD via I2C, address is 0x27
@@ -103,6 +103,8 @@ byte blinks = 3;
 int blinkDelay = 500;
 int conveyorOnDelay = 250;
 int solenoidOnTime = 2000;
+unsigned long startTime;  // To time dispensing delay time (pill-blocking or no pills)
+const long idleTime = 10000;
 
 char key;  // Stores the value of current key pressed
 String input = "";  // Stores the user's input
@@ -137,11 +139,11 @@ void setup(){
 
     // Set the motor maximum speed
     counterA_Motor.setMaxSpeed(stepperMotorMaxSpeed);  
-    counterB_Motor.setMaxSpeed(stepperMotorMaxSpeed);
+    counterB_Motor.setMaxSpeed(stepperMotorMaxSpeed - 100);
     counterC_Motor.setMaxSpeed(stepperMotorMaxSpeed);
 
     // Set the motor speed
-    counterA_Motor.setSpeed(stepperMotorSpeed);  // Lower speed to overcome friction
+    counterA_Motor.setSpeed(stepperMotorSpeed);
     counterB_Motor.setSpeed(stepperMotorSpeed);
     counterC_Motor.setSpeed(stepperMotorSpeed);
     
@@ -171,7 +173,7 @@ void loop(){
         lcd.setCursor(0, 3);
         lcd.print("C: Paracetamol");
 
-        key = keypad.getKey();  // Read the keypad
+        key = myKeypad.getKey();  // Read the keypad
         if (key){
             if (key == 'A' || key == 'B' || key == 'C'){
                 pillType = key;
@@ -194,17 +196,19 @@ void loop(){
         lcd.setCursor(0, 3);
         lcd.print("*: BACK     #: ENTER");
 
-        key = keypad.getKey();  // Read the keypad
+        key = myKeypad.getKey();  // Read the keypad
         if (key){
             if (isDigit(key)){
                 input += key;
             }
             else if (key == '*'){
+                // Go back
                 if (input == ""){
                     validPillType = false;
                     lcd.clear();
                     break;
                 }
+                // Erase
                 else {
                     input.remove(input.length() - 1);
                     lcd.clear();
@@ -266,7 +270,7 @@ void loop(){
         lcd.setCursor(0, 3);
         lcd.print("Count: ");
         lcd.print(count);
-        delay(1000);
+        delay(1200);
 
         // Dispense a single vial
         digitalWrite(conveyorMotor, HIGH);
@@ -276,7 +280,7 @@ void loop(){
         digitalWrite(solenoid1, LOW);
         delay(conveyorOnDelay);
         digitalWrite(solenoid2, HIGH);
-        delay(solenoidOnTime);
+        delay(solenoidOnTime - 500);
         digitalWrite(solenoid2, LOW);
 
         // Wait until vial reaches selected counter then stop
@@ -285,6 +289,8 @@ void loop(){
         }
         digitalWrite(conveyorMotor, LOW);
 
+        startTime = millis();  // Instantiate start time to the current time
+        
         // Wait until counting is finished to continue
         while (count < pillAmount){
             currentCounterMotor.runSpeed();
@@ -296,21 +302,61 @@ void loop(){
                 lcd.setCursor(0, 3);
                 lcd.print("Count: ");
                 lcd.print(count);
+
+                startTime = millis();
             }
 
             // If no pill is currently being counted, reset boolean state for counting
             else if (!digitalRead(currentCounterSensor)){
                 alreadyCounted = false;
             }
+
+            // If there is blockage or no pills being detected by sensor, stop the motor
+            if (millis() - startTime >= idleTime){
+                currentCounterMotor.stop();
+                currentCounterMotor.disableOutputs();  // To prevent motors from overheating
+
+                lcd.clear();
+                lcd.setCursor(1, 0);
+                lcd.print("Check Blockage or");
+                lcd.setCursor(4, 1);
+                lcd.print("add Pills");
+                lcd.setCursor(9, 3);
+                lcd.print("#: Continue");
+
+                // Wait until user presses 'Continue' to proceed
+                while (true){
+                    key = myKeypad.getKey();
+                    
+                    if (key == '#'){
+                        lcd.clear();
+                        lcd.setCursor(0, 0);
+                        lcd.print("Dispensing ");
+                        lcd.print(pillAmount);
+                        lcd.print(" Pills");
+                        lcd.setCursor(0, 1);
+                        lcd.print("of ");
+                        lcd.print(pillName);
+                        lcd.setCursor(0, 3);
+                        lcd.print("Count: ");
+                        lcd.print(count);
+
+                        currentCounterMotor.setSpeed(stepperMotorSpeed);  // Reset the speed after stop() changed it
+                        startTime = millis();
+                        break;
+                    }
+                }
+            }
         }
         currentCounterMotor.stop();
+        currentCounterMotor.disableOutputs();  // To prevent motors from overheating
         delay(1000);
 
         // Wait until vial reaches collection slot then stop
         while (!digitalRead(collectionSlot_Sensor)){
             digitalWrite(conveyorMotor, HIGH);
         }
-        delay(150);
+        delay(150);  // To completely block the sensors, wait for a short while before switching conveyor off
         digitalWrite(conveyorMotor, LOW);
         lcd.clear();
 
@@ -355,74 +401,3 @@ void invalidChoice(){
     }
     lcd.clear();
 }
-
-/*
-// Wiring: SDA pin is connected to pin 20, SCL pin is connected to pin 21 of Arduino Mega
-// Connect LCD via I2C, address is 0x27
-LiquidCrystal_I2C lcd = LiquidCrystal_I2C(0x27, 20, 4);  // 20x4 LCD
-bool startUp = true;  // Boolean state to only display start-up message once
-
-// IR Counting Sensor variables
-int irSensor = 14;  //Infrared receiver pin variable
-int count = 0;  // Initialize count at 0
-bool alreadyCounted = false;  // Boolean state for preventing counting object twice
-
-void setup() {
-    //Initiate the LCD
-    lcd.init();
-    lcd.backlight();
-
-    pinMode(irSensor, INPUT);  // Set sensor pin as input
-}
-
-void loop() {
-    //Display start-up message
-    if (startUp){
-        //Print 'Welcome To' on the second line of the LCD
-        lcd.setCursor(5, 1);  // Set the cursor on the sixth column and second row
-        lcd.print("Welcome To");
-        lcd.setCursor(6, 2);
-        lcd.print("FYP 16-4");
-
-        startUp = false;
-        delay(3500);
-        lcd.clear();
-    }
-
-    // If sensor gives a HIGH signal (object is detected) and object has not yet been counted, count it
-    if (digitalRead(irSensor) && !alreadyCounted){
-        count++;
-        alreadyCounted = true;
-        lcd.clear();
-        lcd.setCursor(3, 0);
-        lcd.print("OBJECT COUNTER");
-        lcd.setCursor(0, 2);
-        lcd.print("Counted Objects: ");
-        lcd.print(count);
-    } 
-
-    // If sensor gives a LOW signal (no object is being counted), reset boolean state for counting
-    else if (!digitalRead(irSensor)){
-        alreadyCounted = false;
-    }
-    
-}
-
-
-// ********* Stepper motor tutorial **********
-
-// Creates an instance
-// Pins entered in sequence IN1-IN3-IN2-IN4 for proper stepping rotation
-AccelStepper counterA_Motor(fullstep, 8, 10, 9, 11);
-
-void setup() {
-    // Set the max speed
-    myStepper.setMaxSpeed(1000);
-    myStepper.setSpeed(500);
-}
-
-void loop() {
-    // Step the motor with constant speed as set by setSpeed()
-    myStepper.runSpeed();
-}
-*/
